@@ -6,8 +6,6 @@ import { resolveCompletionItemDetails } from "./uri_helpers";
 
 const openGraphQLTag = /gql`[^`]*$/;
 
-// this method is called when your extension is activated
-// your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
     const workspaceFolders = vscode.workspace.workspaceFolders;
 
@@ -22,12 +20,10 @@ export function activate(context: vscode.ExtensionContext) {
         workspaceFolders
     );
 
-    // Whenever there is a change to the workspace folders refresh the cache
     const workspaceWatcher = vscode.workspace.onDidChangeWorkspaceFolders(
         moduleCompletionItemsCache.handleWorkspaceChange
     );
 
-    // Whenever a file is added or removed refresh the cache
     const fileSystemWatcher = vscode.workspace.createFileSystemWatcher(
         "**/*.{ts,tsx,js,jsx}",
         false,
@@ -52,7 +48,6 @@ export function activate(context: vscode.ExtensionContext) {
     tsconfigWatcher.onDidCreate(refreshAliases);
     tsconfigWatcher.onDidDelete(refreshAliases);
 
-    // Only update on save, not every keystroke
     const supportedLanguages = new Set(["typescript", "typescriptreact", "javascript", "javascriptreact"]);
     const saveWatcher = vscode.workspace.onDidSaveTextDocument(doc => {
         if (!supportedLanguages.has(doc.languageId)) return;
@@ -86,7 +81,6 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(provider, fileSystemWatcher, workspaceWatcher, saveWatcher, tsconfigWatcher);
 }
 
-// this method is called when your extension is deactivated
 // eslint-disable-next-line @typescript-eslint/no-empty-function
 export function deactivate() {}
 

@@ -24,7 +24,6 @@ interface Workspace {
  * solution might be to implement some type of trie tree for CompletionItems
  */
 export class CompletionItemsCacheImpl implements CompletionItemsCache {
-    // Map from workspaceFolder.name -> cached workspace data
     private _cache: Record<string, Workspace> = {};
 
     constructor(workspaceFolders: readonly vscode.WorkspaceFolder[]) {
@@ -180,14 +179,12 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
     private _syncConfigWatchers = (workspace: Workspace, configFiles: string[]): void => {
         const newSet = new Set(configFiles);
 
-        // Remove watchers for files no longer referenced
         for (const [fsPath, watcher] of workspace.configWatchers) {
             if (newSet.has(fsPath)) continue;
             watcher.close();
             workspace.configWatchers.delete(fsPath);
         }
 
-        // Add watchers for newly discovered config files
         for (const fsPath of configFiles) {
             if (workspace.configWatchers.has(fsPath)) continue;
             try {
@@ -213,7 +210,6 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         const oldName = workspace.customNames[uri.path];
         if (name === oldName) return; // no change, skip re-bucketing
 
-        // Remove from current bucket via reverse lookup
         const oldPrefix = workspace.prefixByPath.get(uri.path);
         if (oldPrefix && workspace.uriMap[oldPrefix]) {
             const bucket = workspace.uriMap[oldPrefix];
@@ -221,7 +217,6 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
             if (idx !== -1) bucket.splice(idx, 1);
         }
 
-        // Re-add to the correct bucket
         const effectiveName = name ?? uriToModuleName(uri);
         const prefix = this._getPrefix(effectiveName);
         workspace.uriMap[prefix] ??= [];

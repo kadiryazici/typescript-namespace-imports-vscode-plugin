@@ -100,7 +100,6 @@ export function uriToCompletionItem(
     const completionItem = new vscode.CompletionItem(moduleName, vscode.CompletionItemKind.Module);
     completionItem.detail = importPath;
     completionItem.sortText = "\0" + moduleName;
-    // Store data for resolveCompletionItem
     (completionItem as unknown as { data: CompletionItemData }).data = { moduleName, importPath };
     return completionItem;
 }
