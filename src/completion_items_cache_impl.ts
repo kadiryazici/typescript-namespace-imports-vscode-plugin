@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { uriToCompletionItem, uriToModuleName, uriToImportPath, resolveImportModuleSpecifier, PathAlias } from "./uri_helpers";
+import { uriToCompletionItem, uriToModuleName, uriToImportPath, getImportModuleSpecifier, PathAlias } from "./uri_helpers";
 import * as Path from "path";
 import * as fs from "fs";
 import { parse as parseTsconfig, TSConfckParseResult } from "tsconfck";
@@ -36,53 +36,48 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         event.removed.forEach(this._removeWorkspace);
     };
 
-    addFile = (uri: vscode.Uri) => {
+    addFile = async (uri: vscode.Uri) => {
         console.log(`[ns-imports] addFile: ${uri.path}`);
         const workspaceFolder = this._getWorkspaceFolderFromUri(uri);
-        if (workspaceFolder) {
-            const workspace = this._cache[workspaceFolder.name];
+        if (!workspaceFolder) return;
 
-            if (workspace) {
-                const moduleName = uriToModuleName(uri);
-                workspace.moduleNames.set(uri.path, moduleName);
-                const prefix = this._getPrefix(moduleName);
-                workspace.uriMap[prefix] ??= [];
-                workspace.uriMap[prefix].push(uri);
-                workspace.prefixByPath.set(uri.path, prefix);
-                this._readCustomName(uri).then(name => {
-                    if (name) {
-                        workspace.customNames[uri.path] = name;
-                        this._rebucketUri(uri, name, workspace.uriMap, workspace.prefixByPath);
-                    }
-                });
-            } else {
-                console.error("Cannot add item: Workspace has not been cached");
-            }
+        const workspace = this._cache[workspaceFolder.name];
+        if (!workspace) {
+            console.error("Cannot add item: Workspace has not been cached");
+            return;
         }
 
-        return;
+        const moduleName = uriToModuleName(uri);
+        workspace.moduleNames.set(uri.path, moduleName);
+        const prefix = this._getPrefix(moduleName);
+        workspace.uriMap[prefix] ??= [];
+        workspace.uriMap[prefix].push(uri);
+        workspace.prefixByPath.set(uri.path, prefix);
+
+        const name = await this._readCustomName(uri);
+        if (name) {
+            workspace.customNames[uri.path] = name;
+            this._rebucketUri(uri, name, workspace.uriMap, workspace.prefixByPath);
+        }
     };
 
     deleteFile = (uri: vscode.Uri) => {
         console.log(`[ns-imports] deleteFile: ${uri.path}`);
         const workspaceFolder = this._getWorkspaceFolderFromUri(uri);
-        if (workspaceFolder) {
-            const workspace = this._cache[workspaceFolder.name];
+        if (!workspaceFolder) return;
 
-            if (workspace) {
-                const prefix = workspace.prefixByPath.get(uri.path);
-                if (prefix && workspace.uriMap[prefix]) {
-                    workspace.uriMap[prefix] = workspace.uriMap[prefix].filter(
-                        u => u.path !== uri.path
-                    );
-                }
-                workspace.prefixByPath.delete(uri.path);
-                workspace.moduleNames.delete(uri.path);
-                delete workspace.customNames[uri.path];
-            }
+        const workspace = this._cache[workspaceFolder.name];
+        if (!workspace) return;
+
+        const prefix = workspace.prefixByPath.get(uri.path);
+        if (prefix && workspace.uriMap[prefix]) {
+            workspace.uriMap[prefix] = workspace.uriMap[prefix].filter(
+                u => u.path !== uri.path
+            );
         }
-
-        return;
+        workspace.prefixByPath.delete(uri.path);
+        workspace.moduleNames.delete(uri.path);
+        delete workspace.customNames[uri.path];
     };
 
     getCompletionList = (doc: vscode.TextDocument, query: string): vscode.CompletionList | [] => {
@@ -104,7 +99,7 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         const importedPaths = new Set(
             [...docText.matchAll(/from\s+["']([^"']+)["']/g)].map(m => m[1])
         );
-        const specifier = resolveImportModuleSpecifier(currentUri);
+        const specifier = getImportModuleSpecifier(currentUri);
         const workspacePath = workspaceFolder.uri.path;
         const uris = workspace.uriMap[this._getPrefix(query)] ?? [];
         const items: vscode.CompletionItem[] = [];
@@ -121,64 +116,65 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
 
     private _removeWorkspace = (workspaceFolder: vscode.WorkspaceFolder): void => {
         const workspace = this._cache[workspaceFolder.name];
-        if (workspace) {
-            for (const watcher of workspace.configWatchers.values()) {
-                watcher.close();
-            }
+        if (!workspace) return;
+
+        for (const watcher of workspace.configWatchers.values()) {
+            watcher.close();
         }
         delete this._cache[workspaceFolder.name];
     };
 
-    private _addWorkspace = (workspaceFolder: vscode.WorkspaceFolder): void => {
+    private _addWorkspace = async (workspaceFolder: vscode.WorkspaceFolder) => {
         console.log(`[ns-imports] _addWorkspace: "${workspaceFolder.name}"`);
         const typescriptPattern = new vscode.RelativePattern(workspaceFolder, "**/*.{ts,tsx,js,jsx}");
-        this._getWorkspacePathAliases(workspaceFolder).then(({ aliases, configFiles }) => {
-            vscode.workspace.findFiles(typescriptPattern).then(
-                uris => {
-                    const uriMap: Record<string, vscode.Uri[]> = {};
-                    const prefixByPath = new Map<string, string>();
-                    const moduleNames = new Map<string, string>();
-                    for (const uri of uris) {
-                        const moduleName = uriToModuleName(uri);
-                        moduleNames.set(uri.path, moduleName);
-                        const prefix = this._getPrefix(moduleName);
-                        uriMap[prefix] ??= [];
-                        uriMap[prefix].push(uri);
-                        prefixByPath.set(uri.path, prefix);
-                    }
-                    const customNames: Record<string, string> = {};
-                    const configWatchers = new Map<string, fs.FSWatcher>();
-                    this._cache[workspaceFolder.name] = { workspaceFolder, pathAliases: aliases, configWatchers, uriMap, customNames, moduleNames, prefixByPath };
-                    this._syncConfigWatchers(this._cache[workspaceFolder.name], configFiles);
-                    console.log(`[ns-imports] _addWorkspace "${workspaceFolder.name}": indexed ${uris.length} files`);
-                    const uriByPath = new Map(uris.map(u => [u.path, u]));
-                    this._readCustomNamesBatched(uris, 64).then(nameMap => {
-                        for (const [path, name] of nameMap) {
-                            customNames[path] = name;
-                            const uri = uriByPath.get(path);
-                            if (uri) this._rebucketUri(uri, name, uriMap, prefixByPath);
-                        }
-                        console.log(`[ns-imports] _addWorkspace "${workspaceFolder.name}": custom names resolved, ${nameMap.size} custom names found`);
-                    });
-                },
-                error => {
-                    console.error(`Error creating cache: ${error}`);
-                }
-            );
-        });
+
+        const [{ aliases, configFiles }, uris] = await Promise.all([
+            this._getWorkspacePathAliases(workspaceFolder),
+            vscode.workspace.findFiles(typescriptPattern).then(undefined, error => {
+                console.error(`Error creating cache: ${error}`);
+                return [] as vscode.Uri[];
+            }),
+        ]);
+
+        const uriMap: Record<string, vscode.Uri[]> = {};
+        const prefixByPath = new Map<string, string>();
+        const moduleNames = new Map<string, string>();
+        for (const uri of uris) {
+            const moduleName = uriToModuleName(uri);
+            moduleNames.set(uri.path, moduleName);
+            const prefix = this._getPrefix(moduleName);
+            uriMap[prefix] ??= [];
+            uriMap[prefix].push(uri);
+            prefixByPath.set(uri.path, prefix);
+        }
+
+        const customNames: Record<string, string> = {};
+        const configWatchers = new Map<string, fs.FSWatcher>();
+        this._cache[workspaceFolder.name] = { workspaceFolder, pathAliases: aliases, configWatchers, uriMap, customNames, moduleNames, prefixByPath };
+        this._syncConfigWatchers(this._cache[workspaceFolder.name], configFiles);
+        console.log(`[ns-imports] _addWorkspace "${workspaceFolder.name}": indexed ${uris.length} files`);
+
+        const uriByPath = new Map(uris.map(u => [u.path, u]));
+        const nameMap = await this._readCustomNamesBatched(uris, 64);
+        for (const [path, name] of nameMap) {
+            customNames[path] = name;
+            const uri = uriByPath.get(path);
+            if (uri) this._rebucketUri(uri, name, uriMap, prefixByPath);
+        }
+        console.log(`[ns-imports] _addWorkspace "${workspaceFolder.name}": custom names resolved, ${nameMap.size} custom names found`);
     };
 
-    refreshPathAliases = (tsconfigUri: vscode.Uri) => {
+    refreshPathAliases = async (tsconfigUri: vscode.Uri) => {
         const workspaceFolder = this._getWorkspaceFolderFromUri(tsconfigUri);
         if (!workspaceFolder) return;
         const workspace = this._cache[workspaceFolder.name];
         if (!workspace) return;
+
         console.log(`[ns-imports] refreshPathAliases: tsconfig changed at ${tsconfigUri.path}`);
-        this._getWorkspacePathAliases(workspaceFolder).then(({ aliases, configFiles }) => {
-            workspace.pathAliases = aliases;
-            this._syncConfigWatchers(workspace, configFiles);
-            console.log(`[ns-imports] refreshPathAliases: resolved ${aliases.length} aliases, watching ${configFiles.length} config files`);
-        });
+        const { aliases, configFiles } = await this._getWorkspacePathAliases(workspaceFolder);
+        workspace.pathAliases = aliases;
+        this._syncConfigWatchers(workspace, configFiles);
+        console.log(`[ns-imports] refreshPathAliases: resolved ${aliases.length} aliases, watching ${configFiles.length} config files`);
     };
 
     private _syncConfigWatchers = (workspace: Workspace, configFiles: string[]): void => {
@@ -186,10 +182,9 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
 
         // Remove watchers for files no longer referenced
         for (const [fsPath, watcher] of workspace.configWatchers) {
-            if (!newSet.has(fsPath)) {
-                watcher.close();
-                workspace.configWatchers.delete(fsPath);
-            }
+            if (newSet.has(fsPath)) continue;
+            watcher.close();
+            workspace.configWatchers.delete(fsPath);
         }
 
         // Add watchers for newly discovered config files
@@ -207,35 +202,37 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         }
     };
 
-    updateFile = (uri: vscode.Uri) => {
+    updateFile = async (uri: vscode.Uri) => {
         console.log(`[ns-imports] updateFile: ${uri.path}`);
         const workspaceFolder = this._getWorkspaceFolderFromUri(uri);
         if (!workspaceFolder) return;
         const workspace = this._cache[workspaceFolder.name];
         if (!workspace) return;
-        this._readCustomName(uri).then(name => {
-            const oldName = workspace.customNames[uri.path];
-            if (name === oldName) return; // no change, skip re-bucketing
 
-            // Remove from current bucket via reverse lookup
-            const oldPrefix = workspace.prefixByPath.get(uri.path);
-            if (oldPrefix && workspace.uriMap[oldPrefix]) {
-                const bucket = workspace.uriMap[oldPrefix];
-                const idx = bucket.findIndex(u => u.path === uri.path);
-                if (idx !== -1) bucket.splice(idx, 1);
-            }
-            // Re-add to the correct bucket
-            const effectiveName = name ?? uriToModuleName(uri);
-            const prefix = this._getPrefix(effectiveName);
-            workspace.uriMap[prefix] ??= [];
-            workspace.uriMap[prefix].push(uri);
-            workspace.prefixByPath.set(uri.path, prefix);
-            if (name) {
-                workspace.customNames[uri.path] = name;
-            } else {
-                delete workspace.customNames[uri.path];
-            }
-        });
+        const name = await this._readCustomName(uri);
+        const oldName = workspace.customNames[uri.path];
+        if (name === oldName) return; // no change, skip re-bucketing
+
+        // Remove from current bucket via reverse lookup
+        const oldPrefix = workspace.prefixByPath.get(uri.path);
+        if (oldPrefix && workspace.uriMap[oldPrefix]) {
+            const bucket = workspace.uriMap[oldPrefix];
+            const idx = bucket.findIndex(u => u.path === uri.path);
+            if (idx !== -1) bucket.splice(idx, 1);
+        }
+
+        // Re-add to the correct bucket
+        const effectiveName = name ?? uriToModuleName(uri);
+        const prefix = this._getPrefix(effectiveName);
+        workspace.uriMap[prefix] ??= [];
+        workspace.uriMap[prefix].push(uri);
+        workspace.prefixByPath.set(uri.path, prefix);
+
+        if (name) {
+            workspace.customNames[uri.path] = name;
+        } else {
+            delete workspace.customNames[uri.path];
+        }
     };
 
     private _rebucketUri = (uri: vscode.Uri, customName: string, uriMap: Record<string, vscode.Uri[]>, prefixByPath: Map<string, string>): void => {
@@ -263,60 +260,60 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         return result;
     };
 
-    private _readCustomName = (uri: vscode.Uri): Promise<string | undefined> => {
-        return new Promise(resolve => {
+    private _readCustomName = async (uri: vscode.Uri): Promise<string | undefined> => {
+        let fd: fs.promises.FileHandle | undefined;
+        try {
+            fd = await fs.promises.open(uri.fsPath, "r");
             const buf = Buffer.alloc(512);
-            fs.open(uri.fsPath, "r", (err, fd) => {
-                if (err) return resolve(undefined);
-                fs.read(fd, buf, 0, 512, 0, (err2, bytesRead) => {
-                    // eslint-disable-next-line @typescript-eslint/no-empty-function
-                    fs.close(fd, () => { /* noop */ });
-                    if (err2) return resolve(undefined);
-                    const text = buf.toString("utf-8", 0, bytesRead);
-                    const lines = text.split("\n");
-                    for (let i = 0; i < Math.min(10, lines.length); i++) {
-                        const match = lines[i].match(/\/\/ #NamespaceName:\s*(\w+)/);
-                        if (match) return resolve(match[1]);
-                    }
-                    resolve(undefined);
-                });
-            });
-        });
+            const { bytesRead } = await fd.read(buf, 0, 512, 0);
+            const text = buf.toString("utf-8", 0, bytesRead);
+            const lines = text.split("\n");
+            for (let i = 0; i < Math.min(10, lines.length); i++) {
+                const match = lines[i].match(/\/\/ #NamespaceName:\s*(\w+)/);
+                if (match) return match[1];
+            }
+            return undefined;
+        } catch {
+            return undefined;
+        } finally {
+            await fd?.close();
+        }
     };
 
-    private _getWorkspacePathAliases = (
+    private _getWorkspacePathAliases = async (
         workspaceFolder: vscode.WorkspaceFolder
-    ): Thenable<{ aliases: PathAlias[]; configFiles: string[] }> => {
+    ): Promise<{ aliases: PathAlias[]; configFiles: string[] }> => {
         const tsconfigPattern = new vscode.RelativePattern(workspaceFolder, "**/tsconfig.json");
 
-        return vscode.workspace.findFiles(tsconfigPattern, "**/node_modules/**").then(
-            uris =>
-                Promise.all(
-                    uris.map(tsconfigUri =>
-                        parseTsconfig(tsconfigUri.fsPath).then(
-                            result => {
-                                const allConfigs = [result, ...(result.referenced ?? [])];
-                                const aliases = allConfigs.flatMap((r: TSConfckParseResult) =>
-                                    this._extractPathAliases(r.tsconfig, r.tsconfigFile, workspaceFolder)
-                                );
-                                const configFiles = allConfigs.map((r: TSConfckParseResult) => r.tsconfigFile);
-                                return { aliases, configFiles };
-                            },
-                            error => {
-                                console.error(`Error parsing ${tsconfigUri.path}: ${error}`);
-                                return { aliases: [] as PathAlias[], configFiles: [] as string[] };
-                            }
-                        )
-                    )
-                ).then(results => ({
-                    aliases: results.flatMap(r => r.aliases),
-                    configFiles: results.flatMap(r => r.configFiles),
-                })),
-            error => {
-                console.error(`Error while finding tsconfig.json files: ${error}`);
-                return { aliases: [], configFiles: [] };
-            }
+        let uris: vscode.Uri[];
+        try {
+            uris = await vscode.workspace.findFiles(tsconfigPattern, "**/node_modules/**");
+        } catch (error) {
+            console.error(`Error while finding tsconfig.json files: ${error}`);
+            return { aliases: [], configFiles: [] };
+        }
+
+        const results = await Promise.all(
+            uris.map(async tsconfigUri => {
+                try {
+                    const result = await parseTsconfig(tsconfigUri.fsPath);
+                    const allConfigs = [result, ...(result.referenced ?? [])];
+                    const aliases = allConfigs.flatMap((r: TSConfckParseResult) =>
+                        this._extractPathAliases(r.tsconfig, r.tsconfigFile, workspaceFolder)
+                    );
+                    const configFiles = allConfigs.map((r: TSConfckParseResult) => r.tsconfigFile);
+                    return { aliases, configFiles };
+                } catch (error) {
+                    console.error(`Error parsing ${tsconfigUri.path}: ${error}`);
+                    return { aliases: [] as PathAlias[], configFiles: [] as string[] };
+                }
+            })
         );
+
+        return {
+            aliases: results.flatMap(r => r.aliases),
+            configFiles: results.flatMap(r => r.configFiles),
+        };
     };
 
     private _extractPathAliases = (

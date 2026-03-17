@@ -53,10 +53,10 @@ export function activate(context: vscode.ExtensionContext) {
     tsconfigWatcher.onDidDelete(refreshAliases);
 
     // Only update on save, not every keystroke
+    const supportedLanguages = new Set(["typescript", "typescriptreact", "javascript", "javascriptreact"]);
     const saveWatcher = vscode.workspace.onDidSaveTextDocument(doc => {
-        if (doc.languageId === "typescript" || doc.languageId === "typescriptreact" || doc.languageId === "javascript" || doc.languageId === "javascriptreact") {
-            moduleCompletionItemsCache.updateFile(doc.uri);
-        }
+        if (!supportedLanguages.has(doc.languageId)) return;
+        moduleCompletionItemsCache.updateFile(doc.uri);
     });
 
     const provider = vscode.languages.registerCompletionItemProvider(
@@ -69,14 +69,12 @@ export function activate(context: vscode.ExtensionContext) {
         {
             provideCompletionItems(doc: vscode.TextDocument, position: vscode.Position) {
                 const wordRange = doc.getWordRangeAtPosition(position);
+                if (!wordRange) return new vscode.CompletionList([], true);
                 // Don't provide completions if the cursor is inside a gql`` template literal to
                 // avoid conflicting with fragment name completions from the GraphQL extension.
-                if (wordRange === undefined || isInGraphQLTag(doc, position)) {
-                    return new vscode.CompletionList([], true);
-                }
+                if (isInGraphQLTag(doc, position)) return new vscode.CompletionList([], true);
 
                 const word = doc.getText(wordRange);
-
                 return moduleCompletionItemsCache.getCompletionList(doc, word);
             },
             resolveCompletionItem(item: vscode.CompletionItem) {

@@ -13,7 +13,7 @@ export interface PathAlias {
 
 type ImportModuleSpecifier = "shortest" | "relative" | "non-relative" | "project-relative";
 
-function getImportModuleSpecifier(currentUri: vscode.Uri): ImportModuleSpecifier {
+export function getImportModuleSpecifier(currentUri: vscode.Uri): ImportModuleSpecifier {
     const tsConfig = vscode.workspace.getConfiguration("typescript", currentUri);
     const tsSpecifier = tsConfig.inspect<ImportModuleSpecifier>("preferences.importModuleSpecifier");
     const tsExplicit = tsSpecifier?.workspaceFolderValue ?? tsSpecifier?.workspaceValue ?? tsSpecifier?.globalValue;
@@ -51,9 +51,6 @@ function toAliasPath(targetUri: vscode.Uri, pathAliases: PathAlias[], workspaceP
     return null;
 }
 
-export function resolveImportModuleSpecifier(currentUri: vscode.Uri): ImportModuleSpecifier {
-    return getImportModuleSpecifier(currentUri);
-}
 
 export function uriToImportPath(
     targetUri: vscode.Uri,
