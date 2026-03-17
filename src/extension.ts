@@ -1,99 +1,91 @@
-import * as uriHelpers from './uri_helpers';
-import * as u from './u';
-import * as vscode from 'vscode';
-import {CompletionItemsService} from './namespace_import_service';
+"use strict";
+import * as vscode from "vscode";
+import { CompletionItemsCache } from "./completion_items_cache";
+import { CompletionItemsCacheImpl } from "./completion_items_cache_impl";
+import { resolveCompletionItemDetails } from "./uri_helpers";
 
-type ExtensionSettings = {
-    quoteStyle: 'single' | 'double';
-};
+const openGraphQLTag = /gql`[^`]*$/;
 
 // this method is called when your extension is activated
 // your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
     const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (workspaceFolders === undefined) {
-        console.warn('No workspace folder. typescript-namespace-imports-vscode-plugin will not work');
+
+    if (!workspaceFolders) {
+        console.warn(
+            "No workspace folder. typescript-namespace-imports-vscode-plugin will not work"
+        );
         return;
     }
 
-    // Cache the quote style and update it when configuration changes
-    let extensionSettings = fetchExtensionSettings();
-    function fetchExtensionSettings(): ExtensionSettings {
-        const config = vscode.workspace.getConfiguration('typescriptNamespaceImports');
-        const value: string = config.get<ExtensionSettings['quoteStyle']>('quoteStyle', 'single');
-        const result = u.parse.string.to.literalUnion(['single', 'double'])(value);
-        if (!result.ok) {
-            console.warn(`Failed to parse settings: "quoteStyle": ${result.err}`);
-            return {
-                quoteStyle: 'single',
-            };
-        }
-        const quoteStyle = result.value;
-        return {quoteStyle};
-    }
-
-    const service = CompletionItemsService.make(workspaceFolders);
-
-    // Listen for configuration changes
-    const configWatcher = vscode.workspace.onDidChangeConfiguration(event => {
-        if (event.affectsConfiguration('typescriptNamespaceImports.quoteStyle')) {
-            extensionSettings = fetchExtensionSettings();
-        }
-    });
+    const moduleCompletionItemsCache: CompletionItemsCache = new CompletionItemsCacheImpl(
+        workspaceFolders
+    );
 
     // Whenever there is a change to the workspace folders refresh the cache
-    const workspaceWatcher = vscode.workspace.onDidChangeWorkspaceFolders(service.handleWorkspaceChangedAsync);
+    const workspaceWatcher = vscode.workspace.onDidChangeWorkspaceFolders(
+        moduleCompletionItemsCache.handleWorkspaceChange
+    );
 
     // Whenever a file is added or removed refresh the cache
-    const fileSystemWatcher = vscode.workspace.createFileSystemWatcher('**/*', false, false, false);
-    fileSystemWatcher.onDidCreate((...args) => {
-        service.handleFileCreatedAsync(...args);
-    });
-    fileSystemWatcher.onDidDelete((...args) => {
-        service.handleFileDeletedAsync(...args);
-    });
-    fileSystemWatcher.onDidChange((...args) => {
-        service.handleFileChangedAsync(...args);
+    const fileSystemWatcher = vscode.workspace.createFileSystemWatcher(
+        "**/*.{ts,tsx,js,jsx}",
+        false,
+        true, // ignore content changes — we use onDidSaveTextDocument instead
+        false
+    );
+    fileSystemWatcher.onDidCreate(moduleCompletionItemsCache.addFile);
+    fileSystemWatcher.onDidDelete(moduleCompletionItemsCache.deleteFile);
+
+    // Watch tsconfig.json create/delete to discover new roots (content changes
+    // are handled by per-file fs.watch watchers inside the cache)
+    const tsconfigWatcher = vscode.workspace.createFileSystemWatcher(
+        "**/tsconfig.json",
+        false,
+        true, // ignore content changes — handled by fs.watch on resolved files
+        false
+    );
+    const refreshAliases = (uri: vscode.Uri) => {
+        if (uri.path.includes("node_modules")) return;
+        moduleCompletionItemsCache.refreshPathAliases(uri);
+    };
+    tsconfigWatcher.onDidCreate(refreshAliases);
+    tsconfigWatcher.onDidDelete(refreshAliases);
+
+    // Only update on save, not every keystroke
+    const saveWatcher = vscode.workspace.onDidSaveTextDocument(doc => {
+        if (doc.languageId === "typescript" || doc.languageId === "typescriptreact" || doc.languageId === "javascript" || doc.languageId === "javascriptreact") {
+            moduleCompletionItemsCache.updateFile(doc.uri);
+        }
     });
 
     const provider = vscode.languages.registerCompletionItemProvider(
         [
-            {scheme: 'file', language: 'typescript'},
-            {scheme: 'file', language: 'typescriptreact'},
+            { scheme: "file", language: "typescript" },
+            { scheme: "file", language: "typescriptreact" },
+            { scheme: "file", language: "javascript" },
+            { scheme: "file", language: "javascriptreact" },
         ],
         {
             provideCompletionItems(doc: vscode.TextDocument, position: vscode.Position) {
-                const documentText = doc.getText();
-
                 const wordRange = doc.getWordRangeAtPosition(position);
                 // Don't provide completions if the cursor is inside a gql`` template literal to
                 // avoid conflicting with fragment name completions from the GraphQL extension.
                 if (wordRange === undefined || isInGraphQLTag(doc, position)) {
                     return new vscode.CompletionList([], true);
                 }
+
                 const word = doc.getText(wordRange);
-                const modulesForCompletion = service.getModulesForCompletion(doc.uri, word);
 
-                let quoteChar: string;
-                switch (extensionSettings.quoteStyle) {
-                    case 'single': quoteChar = "'"; break;
-                    case 'double': quoteChar = '"'; break;
-                    default: throw u.impossible(extensionSettings.quoteStyle);
-                }
-
-                const completionItems: Array<vscode.CompletionItem> = [];
-                for (const {moduleName, importPath} of modulesForCompletion) {
-                    const importStatement = `import * as ${moduleName} from ${quoteChar}${importPath}${quoteChar};\n`;
-                    if (!documentText.includes(importStatement)) {
-                        completionItems.push(uriHelpers.makeCompletionItem(moduleName, importStatement));
-                    }
-                }
-                return new vscode.CompletionList(completionItems, false);
+                return moduleCompletionItemsCache.getCompletionList(doc, word);
             },
-        },
+            resolveCompletionItem(item: vscode.CompletionItem) {
+                return resolveCompletionItemDetails(item);
+            },
+        }
     );
 
-    context.subscriptions.push(provider, fileSystemWatcher, workspaceWatcher, configWatcher);
+    context.subscriptions.push(provider, fileSystemWatcher, workspaceWatcher, saveWatcher, tsconfigWatcher);
 }
 
 // this method is called when your extension is deactivated
@@ -110,18 +102,18 @@ function isInGraphQLTag(doc: vscode.TextDocument, position: vscode.Position): bo
     if (openGraphQLTag.test(textBeforeCursor)) {
         return true;
     }
-    if (textBeforeCursor.includes('`') || textBeforeCursor.includes(';')) {
+    if (textBeforeCursor.includes("`") || textBeforeCursor.includes(";")) {
         return false;
     }
-    for (let i = position.line - 1; i >= 0; i--) {
+    const scanLimit = Math.max(0, position.line - 100);
+    for (let i = position.line - 1; i >= scanLimit; i--) {
         const line = doc.lineAt(i).text;
         if (openGraphQLTag.test(line)) {
             return true;
         }
-        if (line.includes('`') || line.includes(';')) {
+        if (line.includes("`") || line.includes(";")) {
             return false;
         }
     }
     return false;
 }
-const openGraphQLTag = /gql`[^`]*$/;

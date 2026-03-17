@@ -1,152 +1,124 @@
-import * as vscode from 'vscode';
-import * as pathUtil from 'path';
-import * as _ from 'lodash';
-import * as u from './u';
-import {TsConfigJson, TsProject, TsProjectPath} from './namespace_import_service';
-
-export function findOwnerTsProjectForTsFile(
-    uri: vscode.Uri,
-    tsProjectPaths: Iterable<TsProjectPath>,
-): TsProjectPath | null {
-    // Find all projects that could contain this file
-    const candidates = u.iter.filter(tsProjectPaths, tsProjectPath => uri.path.startsWith(tsProjectPath));
-    if (candidates.length === 0) return null;
-
-    // Return the project with the deepest (most specific) root path
-    return u.max(candidates, u.cmp.transform(path => path.length, u.cmp.number));
+import * as vscode from "vscode";
+import * as Path from "path";
+function toPascalCase(s: string): string {
+    return s.replace(/(?:^|[-_.\s]+)(\w)/g, (_, c) => c.toUpperCase()).replace(/[-_.\s]+/g, "");
 }
 
-type ModuleEvaluationForTsProject =
-    | {type: 'bareImport'; moduleName: string; importPath: string}
-    | {type: 'relativeImport'; moduleName: string}
-    | {type: 'importDisallowed'};
-
-// TODO: Looks like TsProject is needed to get the workspaceFolder.
-// Could we just pass the workspaceFolder directly in as a separate parameter?
-// Then we could... pass in tsConfigJson instead of TsProject, and remove the 'workspaceFolder' property
-// from TsProject potentially.
-export function evaluateModuleForTsProject(
-    tsProjectPath: TsProjectPath,
-    tsProject: TsProject,
-    moduleUri: vscode.Uri,
-): ModuleEvaluationForTsProject {
-    const moduleName = makeModuleName(moduleUri);
-
-    const bareImportPath = makeBareImportPath(tsProjectPath, tsProject, moduleUri);
-    if (bareImportPath !== null) {
-        return {
-            type: 'bareImport',
-            moduleName,
-            importPath: bareImportPath,
-        };
-    }
-
-    if (moduleUri.path.startsWith(tsProjectPath)) {
-        return {
-            type: 'relativeImport',
-            moduleName,
-        };
-    }
-
-    return {type: 'importDisallowed'};
+export interface PathAlias {
+    /** Workspace-relative prefix the file must start with (e.g. "src/components/") */
+    targetPrefix: string;
+    /** Alias prefix to substitute in (e.g. "@components/") */
+    aliasPrefix: string;
 }
 
-export function makeCompletionItem(
+type ImportModuleSpecifier = "shortest" | "relative" | "non-relative" | "project-relative";
+
+function getImportModuleSpecifier(currentUri: vscode.Uri): ImportModuleSpecifier {
+    const tsConfig = vscode.workspace.getConfiguration("typescript", currentUri);
+    const tsSpecifier = tsConfig.inspect<ImportModuleSpecifier>("preferences.importModuleSpecifier");
+    const tsExplicit = tsSpecifier?.workspaceFolderValue ?? tsSpecifier?.workspaceValue ?? tsSpecifier?.globalValue;
+    if (tsExplicit) {
+        return tsExplicit;
+    }
+    const jstsConfig = vscode.workspace.getConfiguration("js/ts", currentUri);
+    return jstsConfig.get<ImportModuleSpecifier>("preferences.importModuleSpecifier", "shortest");
+}
+
+function stripExt(p: string): string {
+    return p.slice(0, p.length - Path.extname(p).length);
+}
+
+function toRelativePath(targetUri: vscode.Uri, currentUri: vscode.Uri): string {
+    const currentDir = Path.dirname(currentUri.path);
+    const rel = Path.relative(currentDir, targetUri.path);
+    const withoutExt = stripExt(rel);
+    return withoutExt.startsWith(".") ? withoutExt : "./" + withoutExt;
+}
+
+function toProjectRelativePath(targetUri: vscode.Uri, workspacePath: string): string {
+    return stripExt(Path.relative(workspacePath, targetUri.path));
+}
+
+function toAliasPath(targetUri: vscode.Uri, pathAliases: PathAlias[], workspacePath: string): string | null {
+    const fileRelative = stripExt(Path.relative(workspacePath, targetUri.path));
+
+    for (const { targetPrefix, aliasPrefix } of pathAliases) {
+        const prefix = targetPrefix.endsWith("/") ? targetPrefix : targetPrefix + "/";
+        if (fileRelative.startsWith(prefix)) {
+            return aliasPrefix + fileRelative.slice(prefix.length);
+        }
+    }
+    return null;
+}
+
+export function resolveImportModuleSpecifier(currentUri: vscode.Uri): ImportModuleSpecifier {
+    return getImportModuleSpecifier(currentUri);
+}
+
+export function uriToImportPath(
+    targetUri: vscode.Uri,
+    currentUri: vscode.Uri,
+    pathAliases: PathAlias[],
+    specifier?: ImportModuleSpecifier,
+    workspacePath?: string
+): string {
+    specifier ??= getImportModuleSpecifier(currentUri);
+    const relativePath = toRelativePath(targetUri, currentUri);
+    workspacePath ??= vscode.workspace.getWorkspaceFolder(targetUri)?.uri.path ?? "";
+
+    switch (specifier) {
+        case "relative":
+            return relativePath;
+        case "project-relative":
+            return toProjectRelativePath(targetUri, workspacePath);
+        case "non-relative":
+            return toAliasPath(targetUri, pathAliases, workspacePath) ?? relativePath;
+        case "shortest":
+        default: {
+            const candidates: string[] = [relativePath, toProjectRelativePath(targetUri, workspacePath)];
+            const alias = toAliasPath(targetUri, pathAliases, workspacePath);
+            if (alias) {
+                candidates.push(alias);
+            }
+            return candidates.reduce((a, b) => (a.length <= b.length ? a : b));
+        }
+    }
+}
+
+export function uriToModuleName(uri: vscode.Uri): string {
+    const fileName = Path.basename(uri.path, Path.extname(uri.path));
+    const name = fileName === "index" ? Path.basename(Path.dirname(uri.path)) : fileName;
+    return toPascalCase(name);
+}
+
+export interface CompletionItemData {
+    moduleName: string;
+    importPath: string;
+}
+
+export function uriToCompletionItem(
     moduleName: string,
-    importStatement: string,
+    importPath: string,
 ): vscode.CompletionItem {
-    const completionItem = new vscode.CompletionItem(
-        {
-            label: moduleName,
-            description: 'namespace import',
-        },
-        vscode.CompletionItemKind.Module,
-    );
-    completionItem.additionalTextEdits = [
-        vscode.TextEdit.insert(new vscode.Position(0, 0), importStatement),
-    ];
+    const completionItem = new vscode.CompletionItem(moduleName, vscode.CompletionItemKind.Module);
+    completionItem.detail = importPath;
+    completionItem.sortText = "\0" + moduleName;
+    // Store data for resolveCompletionItem
+    (completionItem as unknown as { data: CompletionItemData }).data = { moduleName, importPath };
     return completionItem;
 }
 
-function makeModuleName(uri: vscode.Uri): string {
-    const fileName = pathUtil.basename(uri.path, uri.path.endsWith('ts') ? '.ts' : '.tsx');
-    return _.camelCase(fileName);
-}
-
-function makeBareImportPath(
-    tsProjectPath: TsProjectPath,
-    tsProject: TsProject,
-    moduleUri: vscode.Uri,
-): string | null {
-    const matchedPath = matchPathPatternForProject(tsProjectPath, tsProject, moduleUri);
-    if (matchedPath !== null) {
-        return u.pathWithoutExt(matchedPath);
-    }
-
-    if (tsProject.tsConfigJson.baseUrl !== null) {
-        const baseUrlPath = pathUtil.resolve(tsProjectPath, tsProject.tsConfigJson.baseUrl);
-        if (moduleUri.path.startsWith(baseUrlPath)) {
-            const moduleRelativePath = pathUtil.relative(baseUrlPath, moduleUri.path);
-
-            if (!doesImportPathViaBaseUrlConflictWithPathsMapping(moduleRelativePath, tsProject.tsConfigJson)) {
-                return u.pathWithoutExt(moduleRelativePath);
-            }
-        }
-    }
-
-    return null;
-}
-
-function matchPathPatternForProject(
-    tsProjectPath: TsProjectPath,
-    tsProject: TsProject,
-    moduleUri: vscode.Uri,
-): string | null {
-    if (!tsProject.tsConfigJson.paths) return null;
-
-    const workspaceFolderPath = tsProject.workspaceFolder.uri.path;
-    const moduleRelativePath = pathUtil.relative(workspaceFolderPath, moduleUri.path);
-
-    const baseUrl = tsProject.tsConfigJson.baseUrl ?? ".";
-    const basePath = pathUtil.resolve(tsProjectPath, baseUrl);
-
-    for (const [pattern, mappings] of Object.entries(tsProject.tsConfigJson.paths)) {
-        for (const mapping of mappings) {
-            const resolvedMapping = pathUtil.resolve(basePath, mapping);
-            const workspaceRelativeMapping = pathUtil.relative(workspaceFolderPath, resolvedMapping);
-
-            if (pattern.includes('*')) {
-                // Handle wildcard: "src/*" matches "src/components/Button"
-                const patternPrefix = pattern.replace('*', '');
-                const mappingPrefix = workspaceRelativeMapping.replace('*', '');
-
-                if (moduleRelativePath.startsWith(mappingPrefix)) {
-                    const suffix = moduleRelativePath.slice(mappingPrefix.length);
-                    return patternPrefix + suffix;
-                }
-            } else if (moduleRelativePath === workspaceRelativeMapping) {
-                return pattern;
-            }
-        }
-    }
-
-    return null;
-}
-
-function doesImportPathViaBaseUrlConflictWithPathsMapping(
-    moduleRelativePath: string,
-    tsConfigJson: TsConfigJson,
-): boolean {
-    if (tsConfigJson.paths === null) return false;
-
-    // Make sure this doesn't conflict with `paths`
-    for (let pattern of Object.keys(tsConfigJson.paths)) {
-        if (pattern.includes('*')) {
-            pattern = pattern.replace('*', '');
-        }
-        if (moduleRelativePath.startsWith(pattern)) {
-            return true;
-        }
-    }
-    return false;
+export function resolveCompletionItemDetails(item: vscode.CompletionItem): vscode.CompletionItem {
+    const data = (item as unknown as { data?: CompletionItemData }).data;
+    if (!data) return item;
+    const { moduleName, importPath } = data;
+    const doc = new vscode.MarkdownString();
+    doc.appendMarkdown(`\`${importPath}\`\n\n`);
+    doc.appendCodeblock(`import * as ${moduleName} from "${importPath}";`, "typescript");
+    item.documentation = doc;
+    const importEdit = `import * as ${moduleName} from "${importPath}";\n`;
+    item.additionalTextEdits = [
+        vscode.TextEdit.insert(new vscode.Position(0, 0), importEdit),
+    ];
+    return item;
 }
