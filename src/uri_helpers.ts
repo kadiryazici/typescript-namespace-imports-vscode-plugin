@@ -120,9 +120,40 @@ export function resolveCompletionItemDetails(item: vscode.CompletionItem): vscod
     doc.appendMarkdown(`\`${importPath}\`\n\n`);
     doc.appendCodeblock(`import * as ${moduleName} from "${importPath}";`, "typescript");
     item.documentation = doc;
+
+    const editor = vscode.window.activeTextEditor;
+    const insertLine = editor ? findImportInsertLine(editor.document) : 0;
     const importEdit = `import * as ${moduleName} from "${importPath}";\n`;
     item.additionalTextEdits = [
-        vscode.TextEdit.insert(new vscode.Position(0, 0), importEdit),
+        vscode.TextEdit.insert(new vscode.Position(insertLine, 0), importEdit),
     ];
     return item;
+}
+
+function findImportInsertLine(doc: vscode.TextDocument): number {
+    let lastImportLine = -1;
+
+    for (let i = 0; i < doc.lineCount; i++) {
+        const line = doc.lineAt(i).text;
+        if (/^\s*import\s/.test(line)) {
+            lastImportLine = i;
+        }
+        // Stop scanning after we've passed the import block (non-empty, non-comment, non-import line)
+        if (lastImportLine !== -1 && line.trim() !== "" && !/^\s*import\s/.test(line) && !/^\s*\/\//.test(line)) {
+            break;
+        }
+    }
+
+    // If we found imports, insert after the last one
+    if (lastImportLine !== -1) return lastImportLine + 1;
+
+    // No imports: find the first line that isn't a comment or empty
+    for (let i = 0; i < doc.lineCount; i++) {
+        const line = doc.lineAt(i).text;
+        if (line.trim() === "") continue;
+        if (/^\s*\/\//.test(line) || /^\s*\/\*/.test(line) || /^\s*\*/.test(line)) continue;
+        return i;
+    }
+
+    return 0;
 }

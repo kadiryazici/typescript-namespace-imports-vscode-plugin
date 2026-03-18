@@ -1,0 +1,14 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+        "namespaceNameAliases": {
+            "type": "object",
+            "description": "Custom namespace names for package imports. Maps import paths to desired namespace names (e.g. { \"motion/react\": \"Motion\" }).",
+            "additionalProperties": {
+                "type": "string",
+                "description": "The namespace name to use for this import path"
+            }
+        }
+    }
+}

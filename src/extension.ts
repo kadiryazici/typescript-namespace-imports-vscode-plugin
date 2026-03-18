@@ -1,8 +1,10 @@
 "use strict";
 import * as vscode from "vscode";
+import * as fs from "fs";
+import * as Path from "path";
 import { CompletionItemsCache } from "./completion_items_cache";
 import { CompletionItemsCacheImpl } from "./completion_items_cache_impl";
-import { resolveCompletionItemDetails } from "./uri_helpers";
+import { resolveCompletionItemDetails, packageNameToModuleName } from "./uri_helpers";
 
 
 export function activate(context: vscode.ExtensionContext) {
@@ -87,9 +89,76 @@ export function activate(context: vscode.ExtensionContext) {
         }
     );
 
-    context.subscriptions.push(provider, fileSystemWatcher, workspaceWatcher, saveWatcher, tsconfigWatcher, packageJsonWatcher);
+    const packageJsonProvider = vscode.languages.registerCompletionItemProvider(
+        { scheme: "file", pattern: "**/package.json" },
+        {
+            provideCompletionItems(doc: vscode.TextDocument, position: vscode.Position) {
+                const textBefore = doc.getText(new vscode.Range(new vscode.Position(0, 0), position));
+                if (!isInsideNamespaceNameAliasesKey(textBefore)) return;
+
+                try {
+                    const content = JSON.parse(doc.getText());
+                    const deps = new Set<string>();
+                    for (const key of ["dependencies", "devDependencies", "peerDependencies"]) {
+                        const section = content[key];
+                        if (section && typeof section === "object") {
+                            for (const name of Object.keys(section)) deps.add(name);
+                        }
+                    }
+
+                    const existing = new Set(Object.keys(content.namespaceNameAliases ?? {}));
+                    const items: vscode.CompletionItem[] = [];
+                    const nodeModulesDir = Path.join(Path.dirname(doc.uri.fsPath), "node_modules");
+
+                    for (const dep of deps) {
+                        if (!existing.has(dep)) {
+                            const item = new vscode.CompletionItem(dep, vscode.CompletionItemKind.Module);
+                            item.insertText = `${dep}": "${packageNameToModuleName(dep)}`;
+                            items.push(item);
+                        }
+
+                        // Sub-path exports
+                        try {
+                            const depPkgPath = Path.join(nodeModulesDir, dep, "package.json");
+                            const depPkg = JSON.parse(fs.readFileSync(depPkgPath, "utf-8"));
+                            const exports = depPkg.exports;
+                            if (!exports || typeof exports !== "object") continue;
+                            for (const key of Object.keys(exports)) {
+                                if (key === "." || key === "./package.json" || !key.startsWith("./") || key.includes("*")) continue;
+                                const importPath = `${dep}/${key.slice(2)}`;
+                                if (existing.has(importPath)) continue;
+                                const item = new vscode.CompletionItem(importPath, vscode.CompletionItemKind.Module);
+                                item.insertText = `${importPath}": "${packageNameToModuleName(importPath)}`;
+                                items.push(item);
+                            }
+                        } catch {
+                            // skip unreadable dep
+                        }
+                    }
+
+                    return items;
+                } catch {
+                    return;
+                }
+            },
+        },
+        '"'
+    );
+
+    context.subscriptions.push(provider, packageJsonProvider, fileSystemWatcher, workspaceWatcher, saveWatcher, tsconfigWatcher, packageJsonWatcher);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-empty-function
 export function deactivate() {}
+
+/** Checks if the cursor is inside a key position within the "namespaceNameAliases" object */
+function isInsideNamespaceNameAliasesKey(textBefore: string): boolean {
+    const aliasIdx = textBefore.lastIndexOf('"namespaceNameAliases"');
+    if (aliasIdx === -1) return false;
+    const afterAlias = textBefore.slice(aliasIdx);
+    const openBrace = afterAlias.indexOf("{");
+    if (openBrace === -1) return false;
+    const closeBrace = afterAlias.indexOf("}");
+    return closeBrace === -1;
+}
 

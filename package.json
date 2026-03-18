@@ -18,7 +18,14 @@
         "onLanguage:javascriptreact"
     ],
     "main": "./out/extension",
-    "contributes": {},
+    "contributes": {
+        "jsonValidation": [
+            {
+                "fileMatch": "package.json",
+                "url": "./schemas/package-json.schema.json"
+            }
+        ]
+    },
     "scripts": {
         "vscode:prepublish": "npm run -S esbuild-base -- --minify",
         "esbuild-base": "rimraf out && esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",

@@ -373,7 +373,7 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         return aliases;
     };
 
-    private _getPackageEntries = (currentUri: vscode.Uri, workspace: Workspace): { entries: PackageEntry[]; byPrefix: Record<string, PackageEntry[]> } | undefined => {
+    private _getPackageEntries = (currentUri: vscode.Uri, workspace: Workspace): PackageJsonCache | undefined => {
         const pkgJsonPath = this._findNearestPackageJson(currentUri.fsPath, workspace.workspaceFolder.uri.fsPath);
         if (!pkgJsonPath) return undefined;
 
@@ -390,15 +390,33 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
                 }
             }
 
+            const nameAliases = (content.namespaceNameAliases ?? {}) as Record<string, string>;
             const entries: PackageEntry[] = [];
             const byPrefix: Record<string, PackageEntry[]> = {};
-            for (const packageName of deps) {
-                const moduleName = packageNameToModuleName(packageName);
-                const entry: PackageEntry = { moduleName, packageName };
+            const addEntry = (moduleName: string, packageName: string) => {
+                const entry: PackageEntry = { moduleName: nameAliases[packageName] ?? moduleName, packageName };
                 entries.push(entry);
-                const prefix = this._getPrefix(moduleName);
+                const prefix = this._getPrefix(entry.moduleName);
                 byPrefix[prefix] ??= [];
                 byPrefix[prefix].push(entry);
+            };
+
+            const nodeModulesDir = Path.join(Path.dirname(pkgJsonPath), "node_modules");
+            for (const packageName of deps) {
+                addEntry(packageNameToModuleName(packageName), packageName);
+
+                // Read sub-path exports from the dependency's package.json
+                const depPkgPath = Path.join(nodeModulesDir, packageName, "package.json");
+                try {
+                    const depPkg = JSON.parse(fs.readFileSync(depPkgPath, "utf-8"));
+                    const subPaths = this._extractSubPathExports(depPkg.exports);
+                    for (const subPath of subPaths) {
+                        const importPath = `${packageName}/${subPath}`;
+                        addEntry(packageNameToModuleName(importPath), importPath);
+                    }
+                } catch {
+                    // dependency package.json not readable, skip exports
+                }
             }
 
             const result = { entries, byPrefix };
@@ -407,6 +425,37 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         } catch {
             return undefined;
         }
+    };
+
+    /** Extracts sub-path export keys (e.g. "react" from "./react") that point to JS files, skipping the main export. */
+    private _extractSubPathExports = (exports: unknown): string[] => {
+        if (!exports || typeof exports !== "object") return [];
+
+        const result: string[] = [];
+        for (const key of Object.keys(exports as Record<string, unknown>)) {
+            // Skip main export and internal paths
+            if (key === "." || key === "./package.json" || !key.startsWith("./")) continue;
+            // Skip wildcard patterns
+            if (key.includes("*")) continue;
+
+            const subPath = key.slice(2); // strip "./"
+            if (this._exportsValuePointsToJs((exports as Record<string, unknown>)[key])) {
+                result.push(subPath);
+            }
+        }
+        return result;
+    };
+
+    /** Recursively checks if an exports value eventually resolves to a .js/.mjs/.cjs file */
+    private _exportsValuePointsToJs = (value: unknown): boolean => {
+        if (typeof value === "string") {
+            return /\.(js|mjs|cjs|ts|mts|cts)$/.test(value);
+        }
+        if (value && typeof value === "object") {
+            // Conditional exports: { import: "...", require: "...", default: "..." }
+            return Object.values(value as Record<string, unknown>).some(v => this._exportsValuePointsToJs(v));
+        }
+        return false;
     };
 
     private _findNearestPackageJson = (fileFsPath: string, workspaceRootFsPath: string): string | undefined => {
