@@ -4,6 +4,7 @@ import * as Path from "path";
 import * as fs from "fs";
 import { parse as parseTsconfig, TSConfckParseResult } from "tsconfck";
 import { CompletionItemsCache } from "./completion_items_cache";
+import { hasNodeTypes, getNodeBuiltinsByPrefix } from "./node_builtins";
 
 interface PackageEntry {
     moduleName: string;
@@ -20,6 +21,7 @@ interface Workspace {
     pathAliases: PathAlias[];
     configWatchers: Map<string, fs.FSWatcher>;
     packageJsonCache: Map<string, PackageJsonCache>; // package.json fsPath -> cached entries
+    nodeTypesAvailable: boolean;
     uriMap: Record<string, vscode.Uri[]>;
     customNames: Record<string, string>;
     moduleNames: Map<string, string>;
@@ -131,6 +133,14 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
             }
         }
 
+        // Add Node.js built-in modules if @types/node is installed
+        if (workspace.nodeTypesAvailable) {
+            for (const { moduleName, importPath } of getNodeBuiltinsByPrefix(prefix)) {
+                if (importedPaths.has(importPath)) continue;
+                items.push(uriToCompletionItem(moduleName, importPath, `namespace: ${importPath}`));
+            }
+        }
+
         console.log(`[ns-imports] getCompletionList: query="${query}", candidates=${uris.length}, results=${items.length}`);
         return new vscode.CompletionList(items, false);
     };
@@ -172,7 +182,8 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         const customNames: Record<string, string> = {};
         const configWatchers = new Map<string, fs.FSWatcher>();
         const packageJsonCache = new Map<string, PackageJsonCache>();
-        this._cache[workspaceFolder.name] = { workspaceFolder, pathAliases: aliases, configWatchers, packageJsonCache, uriMap, customNames, moduleNames, prefixByPath };
+        const nodeTypesAvailable = hasNodeTypes(workspaceFolder.uri.fsPath);
+        this._cache[workspaceFolder.name] = { workspaceFolder, pathAliases: aliases, configWatchers, packageJsonCache, nodeTypesAvailable, uriMap, customNames, moduleNames, prefixByPath };
         this._syncConfigWatchers(this._cache[workspaceFolder.name], configFiles);
         console.log(`[ns-imports] _addWorkspace "${workspaceFolder.name}": indexed ${uris.length} files`);
 
@@ -228,6 +239,7 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         const workspace = this._cache[workspaceFolder.name];
         if (!workspace) return;
         workspace.packageJsonCache.delete(uri.fsPath);
+        workspace.nodeTypesAvailable = hasNodeTypes(workspaceFolder.uri.fsPath);
         console.log(`[ns-imports] invalidatePackageJson: ${uri.path}`);
     };
 
