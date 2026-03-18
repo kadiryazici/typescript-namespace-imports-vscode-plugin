@@ -4,7 +4,6 @@ import * as Path from "path";
 import * as fs from "fs";
 import { parse as parseTsconfig, TSConfckParseResult } from "tsconfck";
 import { CompletionItemsCache } from "./completion_items_cache";
-import { AmbientModulesResolver } from "./ambient_modules";
 
 interface PackageEntry {
     moduleName: string;
@@ -20,8 +19,7 @@ interface Workspace {
     workspaceFolder: vscode.WorkspaceFolder;
     pathAliases: PathAlias[];
     configWatchers: Map<string, fs.FSWatcher>;
-    packageJsonCache: Map<string, PackageJsonCache>;
-    ambientModules: AmbientModulesResolver;
+    packageJsonCache: Map<string, PackageJsonCache>; // package.json fsPath -> cached entries
     uriMap: Record<string, vscode.Uri[]>;
     customNames: Record<string, string>;
     moduleNames: Map<string, string>;
@@ -133,12 +131,6 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
             }
         }
 
-        // Add ambient modules (Node builtins, declare module, etc.)
-        for (const { moduleName, importPath } of workspace.ambientModules.getByPrefix(prefix)) {
-            if (importedPaths.has(importPath)) continue;
-            items.push(uriToCompletionItem(moduleName, importPath, `namespace: ${importPath}`));
-        }
-
         console.log(`[ns-imports] getCompletionList: query="${query}", candidates=${uris.length}, results=${items.length}`);
         return new vscode.CompletionList(items, false);
     };
@@ -157,7 +149,7 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         console.log(`[ns-imports] _addWorkspace: "${workspaceFolder.name}"`);
         const typescriptPattern = new vscode.RelativePattern(workspaceFolder, "**/*.{ts,tsx,js,jsx}");
 
-        const [{ aliases, configFiles, parseResults }, uris] = await Promise.all([
+        const [{ aliases, configFiles }, uris] = await Promise.all([
             this._getWorkspacePathAliases(workspaceFolder),
             vscode.workspace.findFiles(typescriptPattern, "**/node_modules/**").then(undefined, error => {
                 console.error(`Error creating cache: ${error}`);
@@ -180,11 +172,7 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         const customNames: Record<string, string> = {};
         const configWatchers = new Map<string, fs.FSWatcher>();
         const packageJsonCache = new Map<string, PackageJsonCache>();
-        const ambientModules = new AmbientModulesResolver();
-        if (parseResults.length > 0) {
-            ambientModules.resolve(parseResults);
-        }
-        this._cache[workspaceFolder.name] = { workspaceFolder, pathAliases: aliases, configWatchers, packageJsonCache, ambientModules, uriMap, customNames, moduleNames, prefixByPath };
+        this._cache[workspaceFolder.name] = { workspaceFolder, pathAliases: aliases, configWatchers, packageJsonCache, uriMap, customNames, moduleNames, prefixByPath };
         this._syncConfigWatchers(this._cache[workspaceFolder.name], configFiles);
         console.log(`[ns-imports] _addWorkspace "${workspaceFolder.name}": indexed ${uris.length} files`);
 
@@ -205,12 +193,9 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         if (!workspace) return;
 
         console.log(`[ns-imports] refreshPathAliases: tsconfig changed at ${tsconfigUri.path}`);
-        const { aliases, configFiles, parseResults } = await this._getWorkspacePathAliases(workspaceFolder);
+        const { aliases, configFiles } = await this._getWorkspacePathAliases(workspaceFolder);
         workspace.pathAliases = aliases;
         this._syncConfigWatchers(workspace, configFiles);
-        if (parseResults.length > 0) {
-            workspace.ambientModules.resolve(parseResults);
-        }
         console.log(`[ns-imports] refreshPathAliases: resolved ${aliases.length} aliases, watching ${configFiles.length} config files`);
     };
 
@@ -324,7 +309,7 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
 
     private _getWorkspacePathAliases = async (
         workspaceFolder: vscode.WorkspaceFolder
-    ): Promise<{ aliases: PathAlias[]; configFiles: string[]; parseResults: TSConfckParseResult[] }> => {
+    ): Promise<{ aliases: PathAlias[]; configFiles: string[] }> => {
         const tsconfigPattern = new vscode.RelativePattern(workspaceFolder, "**/tsconfig.json");
 
         let uris: vscode.Uri[];
@@ -332,7 +317,7 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
             uris = await vscode.workspace.findFiles(tsconfigPattern, "**/node_modules/**");
         } catch (error) {
             console.error(`Error while finding tsconfig.json files: ${error}`);
-            return { aliases: [], configFiles: [], parseResults: [] };
+            return { aliases: [], configFiles: [] };
         }
 
         const results = await Promise.all(
@@ -344,10 +329,10 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
                         this._extractPathAliases(r.tsconfig, r.tsconfigFile, workspaceFolder)
                     );
                     const configFiles = allConfigs.map((r: TSConfckParseResult) => r.tsconfigFile);
-                    return { aliases, configFiles, parseResults: allConfigs };
+                    return { aliases, configFiles };
                 } catch (error) {
                     console.error(`Error parsing ${tsconfigUri.path}: ${error}`);
-                    return { aliases: [] as PathAlias[], configFiles: [] as string[], parseResults: [] as TSConfckParseResult[] };
+                    return { aliases: [] as PathAlias[], configFiles: [] as string[] };
                 }
             })
         );
@@ -355,7 +340,6 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         return {
             aliases: results.flatMap(r => r.aliases),
             configFiles: results.flatMap(r => r.configFiles),
-            parseResults: results.flatMap(r => r.parseResults),
         };
     };
 
