@@ -1,33 +1,67 @@
 # Typescript Namespace Imports
 
-A VSCode plugin that makes it easier to automatically include namespace imports.
+A VS Code extension that provides autocomplete for [namespace imports](http://exploringjs.com/es6/ch_modules.html#_importing-styles):
 
-A [namespace import](http://exploringjs.com/es6/ch_modules.html#_importing-styles) is an import like:
-```
-import * as moduleName from 'path/to/module_name';
+```typescript
+import * as ModuleName from "path/to/module_name";
 ```
 
 ## Features
 
-This plugin offers the camelCase version of every typescript file in your workspace as a module inside of autocomplete.
+### Workspace File Imports
 
-For example if the file `module_name` exists in your
-workspace, it will offer to import it as a module called
-`moduleName`.
+Every TypeScript and JavaScript file in your workspace is offered as a PascalCase namespace import.
 
-- As you type "moduleNa", you will see "moduleName" as an autocomplete suggestion.
-- If you select it, then `import * as moduleName from 'path/to/module_name';` will automatically be added to the top of the file.
+- `module_name.ts` → `ModuleName`
+- `my-component.tsx` → `MyComponent`
+- `index.ts` inside `utils/` → `Utils`
 
-## Extension Settings
+As you type, matching module names appear in autocomplete. Selecting one inserts the import statement automatically.
 
+### Package Imports
+
+Dependencies from your `package.json` are also suggested as namespace imports:
+
+- `react` → `React`
+- `@seamapi/react` → `SeamapiReact`
+
+Sub-path exports are supported too — if a package exposes `./react` in its `exports` field, you'll get a suggestion like `motion/react` → `MotionReact`.
+
+### Custom Names via `// #NamespaceName:`
+
+Add a comment to the top of any file to override the generated name:
+
+```typescript
+// #NamespaceName: MyCustomName
+export function foo() {}
 ```
-"typescriptNamespaceImports.quoteStyle": {
-    "type": "string",
-    "enum": [
-        "single",
-        "double"
-    ],
-    "default": "single",
-    "description": "Whether the auto-inserted import statement should use single or double quotes."
+
+This file will appear as `MyCustomName` instead of the filename-derived name.
+
+### Custom Names via `namespaceNameAliases` in `package.json`
+
+Override namespace names for packages by adding a `namespaceNameAliases` field to your `package.json`:
+
+```json
+{
+  "namespaceNameAliases": {
+    "motion/react": "Motion",
+    "@seamapi/react": "Seam"
+  }
 }
 ```
+
+Autocomplete is provided for the keys — it suggests your dependencies and their sub-path exports.
+
+### Path Resolution
+
+The extension respects VS Code's `typescript.preferences.importModuleSpecifier` setting (and the `js/ts.preferences.importModuleSpecifier` fallback):
+
+| Setting              | Behavior                                                            |
+| -------------------- | ------------------------------------------------------------------- |
+| `shortest` (default) | Picks the shortest path among relative, project-relative, and alias |
+| `relative`           | Always uses `./` relative paths                                     |
+| `non-relative`       | Uses path aliases if available, falls back to relative              |
+| `project-relative`   | Uses paths relative to the workspace root                           |
+
+TypeScript `paths` mappings from `tsconfig.json` (including referenced configs) are resolved and used for alias-based imports.

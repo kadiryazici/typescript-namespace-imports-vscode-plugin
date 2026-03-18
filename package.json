@@ -2,9 +2,9 @@
     "name": "typescript-namespace-imports",
     "displayName": "Typescript Namespace Imports",
     "description": "Adds autocomplete support for `import * as moduleName from 'path/to/module_name'`",
-    "repository": "https://github.com/echentw/typescript-namespace-imports-vscode-plugin",
-    "version": "0.5.3",
-    "publisher": "echentw",
+    "repository": "https://github.com/kadiryazici/typescript-namespace-imports-vscode-plugin",
+    "version": "0.6.0",
+    "publisher": "kadiryazici",
     "engines": {
         "vscode": "^1.67.0"
     },
@@ -34,7 +34,7 @@
         "lint": "eslint . --ext .ts",
         "tsc-watch": "tsc --watch",
         "tsc-build": "tsc",
-        "build-and-install": "npm run build && npx vsce package --no-dependencies && code --install-extension typescript-namespace-imports-0.5.3.vsix --force"
+        "build-and-install": "npm run build && npx vsce package --no-dependencies && code --install-extension typescript-namespace-imports-0.6.0.vsix --force"
     },
     "devDependencies": {
         "@types/node": "^24.3.0",
