@@ -122,15 +122,15 @@ export function resolveCompletionItemDetails(item: vscode.CompletionItem): vscod
     item.documentation = doc;
 
     const editor = vscode.window.activeTextEditor;
-    const insertLine = editor ? findImportInsertLine(editor.document) : 0;
-    const importEdit = `import * as ${moduleName} from "${importPath}";\n`;
+    const { line: insertLine, hasExistingImports } = editor ? findImportInsertLine(editor.document) : { line: 0, hasExistingImports: false };
+    const importEdit = `import * as ${moduleName} from "${importPath}";\n` + (hasExistingImports ? "" : "\n");
     item.additionalTextEdits = [
         vscode.TextEdit.insert(new vscode.Position(insertLine, 0), importEdit),
     ];
     return item;
 }
 
-function findImportInsertLine(doc: vscode.TextDocument): number {
+function findImportInsertLine(doc: vscode.TextDocument): { line: number; hasExistingImports: boolean } {
     let lastImportLine = -1;
 
     for (let i = 0; i < doc.lineCount; i++) {
@@ -138,22 +138,23 @@ function findImportInsertLine(doc: vscode.TextDocument): number {
         if (/^\s*import\s/.test(line)) {
             lastImportLine = i;
         }
-        // Stop scanning after we've passed the import block (non-empty, non-comment, non-import line)
         if (lastImportLine !== -1 && line.trim() !== "" && !/^\s*import\s/.test(line) && !/^\s*\/\//.test(line)) {
             break;
         }
     }
 
-    // If we found imports, insert after the last one
-    if (lastImportLine !== -1) return lastImportLine + 1;
+    if (lastImportLine !== -1) return { line: lastImportLine + 1, hasExistingImports: true };
 
-    // No imports: find the first line that isn't a comment or empty
+    // No imports: skip leading single-line comments (// ...).
+    // Stop at JSDoc/block comments (/** or /*) since those are attached to the code below.
+    let lastEmptyLine = -1;
     for (let i = 0; i < doc.lineCount; i++) {
         const line = doc.lineAt(i).text;
-        if (line.trim() === "") continue;
-        if (/^\s*\/\//.test(line) || /^\s*\/\*/.test(line) || /^\s*\*/.test(line)) continue;
-        return i;
+        if (line.trim() === "") { lastEmptyLine = i; continue; }
+        if (/^\s*\/\//.test(line)) continue;
+        if (/^\s*["']use\s/.test(line)) continue;
+        return { line: lastEmptyLine !== -1 ? lastEmptyLine : i, hasExistingImports: false };
     }
 
-    return 0;
+    return { line: 0, hasExistingImports: false };
 }
