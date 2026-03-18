@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as Path from "path";
+
 function toPascalCase(s: string): string {
     return s.replace(/(?:^|[-_.\s]+)(\w)/g, (_, c) => c.toUpperCase()).replace(/[-_.\s]+/g, "");
 }
@@ -158,3 +159,5 @@ function findImportInsertLine(doc: vscode.TextDocument): { line: number; hasExis
 
     return { line: 0, hasExistingImports: false };
 }
+
+
