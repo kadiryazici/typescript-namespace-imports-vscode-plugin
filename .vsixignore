@@ -1,0 +1,8 @@
+.vscode/**
+src/**
+node_modules/**
+tsconfig.json
+vsc-extension-quickstart.md
+CLAUDE.md
+*.vsix
+.eslintrc*

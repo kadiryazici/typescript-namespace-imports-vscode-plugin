@@ -1,4 +1,4 @@
-# Typescript Namespace Imports
+# Auto Namespace Imports
 
 A VS Code extension that provides autocomplete for [namespace imports](http://exploringjs.com/es6/ch_modules.html#_importing-styles):
 
