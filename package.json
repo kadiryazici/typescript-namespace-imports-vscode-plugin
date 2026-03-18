@@ -6,7 +6,7 @@
     "version": "0.5.3",
     "publisher": "echentw",
     "engines": {
-        "vscode": "^1.63.1"
+        "vscode": "^1.67.0"
     },
     "categories": [
         "Other"
@@ -26,11 +26,12 @@
         "watch": "npm run -S esbuild-base -- --sourcemap --watch",
         "lint": "eslint . --ext .ts",
         "tsc-watch": "tsc --watch",
-        "tsc-build": "tsc"
+        "tsc-build": "tsc",
+        "build-and-install": "npm run build && npx vsce package --no-dependencies && code --install-extension typescript-namespace-imports-0.5.3.vsix --force"
     },
     "devDependencies": {
         "@types/node": "^24.3.0",
-        "@types/vscode": "^1.63.1",
+        "@types/vscode": "^1.67.0",
         "@typescript-eslint/eslint-plugin": "^5.9.0",
         "@typescript-eslint/parser": "^5.9.0",
         "esbuild": "^0.25.9",

@@ -1,18 +1,29 @@
 import * as vscode from "vscode";
-import { uriToCompletionItem, uriToModuleName, uriToImportPath, getImportModuleSpecifier, PathAlias } from "./uri_helpers";
+import { uriToCompletionItem, uriToModuleName, uriToImportPath, getImportModuleSpecifier, packageNameToModuleName, PathAlias } from "./uri_helpers";
 import * as Path from "path";
 import * as fs from "fs";
 import { parse as parseTsconfig, TSConfckParseResult } from "tsconfck";
 import { CompletionItemsCache } from "./completion_items_cache";
 
+interface PackageEntry {
+    moduleName: string;
+    packageName: string;
+}
+
+interface PackageJsonCache {
+    entries: PackageEntry[];
+    byPrefix: Record<string, PackageEntry[]>;
+}
+
 interface Workspace {
     workspaceFolder: vscode.WorkspaceFolder;
     pathAliases: PathAlias[];
-    configWatchers: Map<string, fs.FSWatcher>; // fsPath -> watcher for each resolved config file
+    configWatchers: Map<string, fs.FSWatcher>;
+    packageJsonCache: Map<string, PackageJsonCache>; // package.json fsPath -> cached entries
     uriMap: Record<string, vscode.Uri[]>;
-    customNames: Record<string, string>; // file path -> custom namespace name
-    moduleNames: Map<string, string>; // uri.path -> cached uriToModuleName result
-    prefixByPath: Map<string, string>; // uri.path -> current bucket prefix (reverse lookup)
+    customNames: Record<string, string>;
+    moduleNames: Map<string, string>;
+    prefixByPath: Map<string, string>;
 }
 
 /**
@@ -100,13 +111,24 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
         );
         const specifier = getImportModuleSpecifier(currentUri);
         const workspacePath = workspaceFolder.uri.path;
-        const uris = workspace.uriMap[this._getPrefix(query)] ?? [];
+        const prefix = this._getPrefix(query);
+        const uris = workspace.uriMap[prefix] ?? [];
         const items: vscode.CompletionItem[] = [];
         for (const uri of uris) {
             const importPath = uriToImportPath(uri, currentUri, workspace.pathAliases, specifier, workspacePath);
             if (importedPaths.has(importPath)) continue;
             const moduleName = workspace.customNames[uri.path] ?? workspace.moduleNames.get(uri.path) ?? uriToModuleName(uri);
-            items.push(uriToCompletionItem(moduleName, importPath));
+            items.push(uriToCompletionItem(moduleName, importPath, `namespace: ${importPath}`));
+        }
+
+        // Add package entries from nearest package.json
+        const pkgData = this._getPackageEntries(currentUri, workspace);
+        if (pkgData) {
+            const pkgEntries = pkgData.byPrefix[prefix] ?? [];
+            for (const { moduleName, packageName } of pkgEntries) {
+                if (importedPaths.has(packageName)) continue;
+                items.push(uriToCompletionItem(moduleName, packageName, `namespace: ${packageName}`));
+            }
         }
 
         console.log(`[ns-imports] getCompletionList: query="${query}", candidates=${uris.length}, results=${items.length}`);
@@ -129,7 +151,7 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
 
         const [{ aliases, configFiles }, uris] = await Promise.all([
             this._getWorkspacePathAliases(workspaceFolder),
-            vscode.workspace.findFiles(typescriptPattern).then(undefined, error => {
+            vscode.workspace.findFiles(typescriptPattern, "**/node_modules/**").then(undefined, error => {
                 console.error(`Error creating cache: ${error}`);
                 return [] as vscode.Uri[];
             }),
@@ -149,7 +171,8 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
 
         const customNames: Record<string, string> = {};
         const configWatchers = new Map<string, fs.FSWatcher>();
-        this._cache[workspaceFolder.name] = { workspaceFolder, pathAliases: aliases, configWatchers, uriMap, customNames, moduleNames, prefixByPath };
+        const packageJsonCache = new Map<string, PackageJsonCache>();
+        this._cache[workspaceFolder.name] = { workspaceFolder, pathAliases: aliases, configWatchers, packageJsonCache, uriMap, customNames, moduleNames, prefixByPath };
         this._syncConfigWatchers(this._cache[workspaceFolder.name], configFiles);
         console.log(`[ns-imports] _addWorkspace "${workspaceFolder.name}": indexed ${uris.length} files`);
 
@@ -197,6 +220,15 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
                 // File may have been deleted between discovery and watch
             }
         }
+    };
+
+    invalidatePackageJson = (uri: vscode.Uri) => {
+        const workspaceFolder = this._getWorkspaceFolderFromUri(uri);
+        if (!workspaceFolder) return;
+        const workspace = this._cache[workspaceFolder.name];
+        if (!workspace) return;
+        workspace.packageJsonCache.delete(uri.fsPath);
+        console.log(`[ns-imports] invalidatePackageJson: ${uri.path}`);
     };
 
     updateFile = async (uri: vscode.Uri) => {
@@ -339,6 +371,54 @@ export class CompletionItemsCacheImpl implements CompletionItemsCache {
             }
         }
         return aliases;
+    };
+
+    private _getPackageEntries = (currentUri: vscode.Uri, workspace: Workspace): { entries: PackageEntry[]; byPrefix: Record<string, PackageEntry[]> } | undefined => {
+        const pkgJsonPath = this._findNearestPackageJson(currentUri.fsPath, workspace.workspaceFolder.uri.fsPath);
+        if (!pkgJsonPath) return undefined;
+
+        const cached = workspace.packageJsonCache.get(pkgJsonPath);
+        if (cached) return cached;
+
+        try {
+            const content = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
+            const deps = new Set<string>();
+            for (const key of ["dependencies", "devDependencies", "peerDependencies"] as const) {
+                const section = content[key];
+                if (section && typeof section === "object") {
+                    for (const name of Object.keys(section)) deps.add(name);
+                }
+            }
+
+            const entries: PackageEntry[] = [];
+            const byPrefix: Record<string, PackageEntry[]> = {};
+            for (const packageName of deps) {
+                const moduleName = packageNameToModuleName(packageName);
+                const entry: PackageEntry = { moduleName, packageName };
+                entries.push(entry);
+                const prefix = this._getPrefix(moduleName);
+                byPrefix[prefix] ??= [];
+                byPrefix[prefix].push(entry);
+            }
+
+            const result = { entries, byPrefix };
+            workspace.packageJsonCache.set(pkgJsonPath, result);
+            return result;
+        } catch {
+            return undefined;
+        }
+    };
+
+    private _findNearestPackageJson = (fileFsPath: string, workspaceRootFsPath: string): string | undefined => {
+        let dir = Path.dirname(fileFsPath);
+        while (dir.length >= workspaceRootFsPath.length) {
+            const candidate = Path.join(dir, "package.json");
+            if (fs.existsSync(candidate)) return candidate;
+            const parent = Path.dirname(dir);
+            if (parent === dir) break;
+            dir = parent;
+        }
+        return undefined;
     };
 
     private _getPrefix = (query: string): string => query.substring(0, 1);

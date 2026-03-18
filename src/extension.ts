@@ -47,6 +47,19 @@ export function activate(context: vscode.ExtensionContext) {
     tsconfigWatcher.onDidCreate(refreshAliases);
     tsconfigWatcher.onDidDelete(refreshAliases);
 
+    const packageJsonWatcher = vscode.workspace.createFileSystemWatcher(
+        "**/package.json",
+        true, // ignore create — picked up lazily on next completion
+        false,
+        false
+    );
+    const invalidatePkgJson = (uri: vscode.Uri) => {
+        if (uri.path.includes("node_modules")) return;
+        moduleCompletionItemsCache.invalidatePackageJson(uri);
+    };
+    packageJsonWatcher.onDidChange(invalidatePkgJson);
+    packageJsonWatcher.onDidDelete(invalidatePkgJson);
+
     const supportedLanguages = new Set(["typescript", "typescriptreact", "javascript", "javascriptreact"]);
     const saveWatcher = vscode.workspace.onDidSaveTextDocument(doc => {
         if (!supportedLanguages.has(doc.languageId)) return;
@@ -74,7 +87,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     );
 
-    context.subscriptions.push(provider, fileSystemWatcher, workspaceWatcher, saveWatcher, tsconfigWatcher);
+    context.subscriptions.push(provider, fileSystemWatcher, workspaceWatcher, saveWatcher, tsconfigWatcher, packageJsonWatcher);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-empty-function

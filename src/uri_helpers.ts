@@ -88,6 +88,13 @@ export function uriToModuleName(uri: vscode.Uri): string {
     return toPascalCase(name);
 }
 
+/** Converts a package name like `@seamapi/react` → `SeamapiReact`, `react` → `React` */
+export function packageNameToModuleName(packageName: string): string {
+    // Strip leading @ and treat slashes as word separators
+    const cleaned = packageName.replace(/^@/, "").replace(/\//g, "-");
+    return toPascalCase(cleaned);
+}
+
 export interface CompletionItemData {
     moduleName: string;
     importPath: string;
@@ -96,9 +103,10 @@ export interface CompletionItemData {
 export function uriToCompletionItem(
     moduleName: string,
     importPath: string,
+    description?: string,
 ): vscode.CompletionItem {
     const completionItem = new vscode.CompletionItem(moduleName, vscode.CompletionItemKind.Module);
-    completionItem.detail = importPath;
+    completionItem.detail = description ?? importPath;
     completionItem.sortText = "\0" + moduleName;
     (completionItem as unknown as { data: CompletionItemData }).data = { moduleName, importPath };
     return completionItem;

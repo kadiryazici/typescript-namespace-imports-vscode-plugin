@@ -6,5 +6,6 @@ export interface CompletionItemsCache {
     updateFile: (uri: vscode.Uri) => void;
     deleteFile: (uri: vscode.Uri) => void;
     refreshPathAliases: (tsconfigUri: vscode.Uri) => void;
+    invalidatePackageJson: (uri: vscode.Uri) => void;
     getCompletionList: (doc: vscode.TextDocument, query: string) => vscode.CompletionList | [];
 }
