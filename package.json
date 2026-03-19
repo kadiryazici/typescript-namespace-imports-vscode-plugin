@@ -45,6 +45,7 @@
         "eslint": "^8.6.0"
     },
     "dependencies": {
+        "minimatch": "^10.2.4",
         "path": "^0.12.7",
         "tsconfck": "^2.1.2"
     }

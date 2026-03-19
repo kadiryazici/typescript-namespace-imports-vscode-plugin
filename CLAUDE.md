@@ -29,6 +29,7 @@ Forked from [echentw/typescript-namespace-imports-vscode-plugin](https://github.
 | `src/completion_items_cache_impl.ts` | Core service: workspace indexing, caching, completions. |
 | `src/uri_helpers.ts` | Import path resolution, module naming, completion item creation. |
 | `src/node_builtins.ts` | Node.js built-in module discovery and `@types/node` detection. |
+| `src/tsconfig_scope.ts` | tsconfig `include`/`exclude` scope matching to filter completions to relevant files. |
 
 ### Key Design Decisions
 
@@ -52,6 +53,9 @@ VS Code's `FileSystemWatcher` handles tsconfig create/delete (to discover new ro
 
 **Node.js built-in modules are gated on `@types/node`.**
 `module.builtinModules` provides the list at runtime. But we only show these completions if `@types/node` exists in the workspace's `node_modules`, since without types the imports would be useless. This check is refreshed when `package.json` changes.
+
+**Completions are scoped to the current file's tsconfig `include`.**
+When providing workspace file completions, we find which tsconfig "owns" the current document (by matching against each tsconfig's `include`/`exclude`/`outDir` patterns). Only files that fall within that same tsconfig scope are suggested. This prevents out-of-scope files (e.g. `dist/` output) from appearing in completions. The scope matching is implemented in `src/tsconfig_scope.ts` using regex-converted glob patterns. If no tsconfig matches the current file, all workspace files are shown (fallback to previous behavior).
 
 **Package completions include sub-path exports.**
 For each dependency, we read its `package.json` `exports` field and extract sub-path entries (e.g. `react-dom/client`). Wildcard patterns and internal paths (`./package.json`) are skipped. The `exports` value is recursively checked to confirm it resolves to a JS/TS file.
