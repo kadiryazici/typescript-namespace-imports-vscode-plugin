@@ -122,7 +122,8 @@ export function resolveCompletionItemDetails(item: vscode.CompletionItem): vscod
     item.documentation = doc;
 
     const editor = vscode.window.activeTextEditor;
-    const { line: insertLine, hasExistingImports } = editor ? findImportInsertLine(editor.document) : { line: 0, hasExistingImports: false };
+    const caretLine = editor ? editor.selection.active.line : 0;
+    const { line: insertLine, hasExistingImports } = editor ? findImportInsertLine(editor.document, caretLine) : { line: 0, hasExistingImports: false };
     const importEdit = `import * as ${moduleName} from "${importPath}";\n` + (hasExistingImports ? "" : "\n");
     item.additionalTextEdits = [
         vscode.TextEdit.insert(new vscode.Position(insertLine, 0), importEdit),
@@ -130,22 +131,56 @@ export function resolveCompletionItemDetails(item: vscode.CompletionItem): vscod
     return item;
 }
 
-function findImportInsertLine(doc: vscode.TextDocument): { line: number; hasExistingImports: boolean } {
-    let lastImportLine = -1;
+function findImportInsertLine(doc: vscode.TextDocument, caretLine: number): { line: number; hasExistingImports: boolean } {
+    // Find the end line of the last complete import statement at or before caretLine.
+    // Handles all multiline import forms:
+    //   import { foo, bar } from "module";       (single line)
+    //   import {                                   (multiline braces)
+    //     foo, bar,
+    //   } from "module";
+    //   import                                     (multiline without braces)
+    //     React
+    //     from "react"
+    //   import "side-effect";                      (side-effect, single line)
+    //
+    // An import is complete when:
+    //   - It's a side-effect import: `import "..."` / `import '...'`
+    //   - It contains `from` followed by a string literal on the same line
+    // Otherwise it's multiline and we keep scanning until we find the `from "..."` line.
+    let lastImportEndLine = -1;
+    let inMultilineImport = false;
 
-    for (let i = 0; i < doc.lineCount; i++) {
-        const line = doc.lineAt(i).text;
-        if (/^\s*import\s/.test(line)) {
-            lastImportLine = i;
+    const limit = Math.min(caretLine, doc.lineCount - 1);
+    for (let i = 0; i <= limit; i++) {
+        const text = doc.lineAt(i).text;
+
+        if (inMultilineImport) {
+            if (/from\s+["']/.test(text)) {
+                inMultilineImport = false;
+                lastImportEndLine = i;
+            }
+            continue;
         }
-        if (lastImportLine !== -1 && line.trim() !== "" && !/^\s*import\s/.test(line) && !/^\s*\/\//.test(line)) {
-            break;
+
+        if (/^\s*import\s/.test(text)) {
+            // Side-effect import: `import "module"` — always single line
+            if (/^\s*import\s+["']/.test(text)) {
+                lastImportEndLine = i;
+                continue;
+            }
+            // Complete single-line import: has `from "..."` on the same line
+            if (/from\s+["']/.test(text)) {
+                lastImportEndLine = i;
+                continue;
+            }
+            // Otherwise it's a multiline import — keep scanning for `from "..."`
+            inMultilineImport = true;
         }
     }
 
-    if (lastImportLine !== -1) return { line: lastImportLine + 1, hasExistingImports: true };
+    if (lastImportEndLine !== -1) return { line: lastImportEndLine + 1, hasExistingImports: true };
 
-    // No imports: skip leading single-line comments (// ...).
+    // No imports before caret: skip leading single-line comments (// ...).
     // Stop at JSDoc/block comments (/** or /*) since those are attached to the code below.
     let lastEmptyLine = -1;
     for (let i = 0; i < doc.lineCount; i++) {
